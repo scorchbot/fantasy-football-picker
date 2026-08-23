@@ -1,0 +1,2 @@
+# Locally exported trained-model artifacts
+artifacts/*.pkl
