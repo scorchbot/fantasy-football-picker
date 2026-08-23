@@ -90,6 +90,14 @@ def validate_league_config(league: Any) -> Mapping[str, Any]:
     if bench_slots < 0:
         raise ValueError("League bench_slots must be a nonnegative integer.")
 
+    team_count = league.get("team_count", 12)
+    if (
+        not isinstance(team_count, int)
+        or isinstance(team_count, bool)
+        or team_count < 1
+    ):
+        raise ValueError("League team_count must be a positive integer.")
+
     return league
 
 
@@ -98,6 +106,7 @@ def create_league_config(
     scoring: Mapping[str, Any],
     roster_slots: Sequence[Mapping[str, Any]],
     bench_slots: int = 0,
+    team_count: int = 12,
 ) -> dict[str, Any]:
     """Create and validate a JSON-serializable league configuration."""
 
@@ -114,6 +123,7 @@ def create_league_config(
             for slot in roster_slots
         ],
         "bench_slots": bench_slots,
+        "team_count": team_count,
     }
     validate_league_config(league)
     return league
@@ -133,6 +143,13 @@ def get_scoring_settings(league: Mapping[str, Any]) -> Mapping[str, Any]:
     return league["scoring"]
 
 
+def get_team_count(league: Mapping[str, Any]) -> int:
+    """Return league size, defaulting legacy configurations to 12 teams."""
+
+    validate_league_config(league)
+    return league.get("team_count", 12)
+
+
 MY_YAHOO_LEAGUE = create_league_config(
     name="My Yahoo League",
     scoring=MY_YAHOO_SCORING,
@@ -146,6 +163,7 @@ MY_YAHOO_LEAGUE = create_league_config(
         {"slot": "FLEX", "eligible": ["RB", "WR", "TE"]},
     ],
     bench_slots=6,
+    team_count=12,
 )
 
 DEFAULT_LEAGUE = MY_YAHOO_LEAGUE
