@@ -161,6 +161,84 @@ class WeekOneInitializationTests(unittest.TestCase):
         self.assertEqual(set(predictions["position"]), set(experiment.POSITIONS))
         self.assertEqual(len(predictions), 16)
 
+    def test_season_and_aggregate_summaries_are_both_produced(self):
+        rows = []
+        for season in (2022, 2023):
+            for position in experiment.POSITIONS:
+                for approach, offset in [
+                    ("season_reset", 1.0),
+                    ("prior_season_carryover", 0.5),
+                ]:
+                    for player, actual in [("a", 5.0), ("b", 10.0)]:
+                        rows.append(
+                            {
+                                "season": season,
+                                "position": position,
+                                "approach": approach,
+                                "actual": actual,
+                                "prediction": actual + offset,
+                                "player_id": player,
+                            }
+                        )
+        predictions = pd.DataFrame(rows)
+
+        seasonal = experiment.summarize_season_results(predictions)
+        aggregate = experiment.summarize_aggregate_results(predictions)
+
+        self.assertEqual(len(seasonal), 8)
+        self.assertEqual(set(seasonal["season"]), {2022, 2023})
+        self.assertTrue(
+            {
+                "reset_mae",
+                "carryover_mae",
+                "reset_rank_correlation",
+                "carryover_rank_correlation",
+                "reset_pairwise_accuracy",
+                "carryover_pairwise_accuracy",
+            }.issubset(seasonal.columns)
+        )
+        self.assertEqual(len(aggregate), 8)
+
+    def test_shadow_mode_uses_carryover_only_for_immediate_returners(self):
+        reset = pd.DataFrame(
+            [
+                {"player_id": "returner", "season": 2021, "week": 1, "rolling": 1.0},
+                {"player_id": "older", "season": 2020, "week": 1, "rolling": 1.0},
+                {"player_id": "returner", "season": 2022, "week": 1, "rolling": np.nan},
+                {"player_id": "older", "season": 2022, "week": 1, "rolling": np.nan},
+                {"player_id": "rookie", "season": 2022, "week": 1, "rolling": np.nan},
+            ]
+        )
+        carryover = reset.copy()
+        carryover.loc[carryover["season"] == 2022, "rolling"] = [7.0, 8.0, 9.0]
+
+        shadow = experiment.build_hybrid_shadow_features(reset, carryover)
+        week_one = shadow.loc[shadow["season"] == 2022].set_index("player_id")
+
+        self.assertEqual(week_one.loc["returner", "rolling"], 7.0)
+        self.assertTrue(pd.isna(week_one.loc["rookie", "rolling"]))
+        self.assertTrue(pd.isna(week_one.loc["older", "rolling"]))
+        self.assertEqual(week_one["rolling"].fillna(4.5).loc["rookie"], 4.5)
+        self.assertTrue(week_one.loc["returner", "has_immediate_prior_season"])
+        self.assertFalse(week_one.loc["older", "has_immediate_prior_season"])
+
+    def test_shadow_mode_does_not_leak_week_one_results(self):
+        reset_original = rolling_rows()
+        reset_changed = rolling_rows(current_points=9999.0, current_carries=8888.0)
+        shadow_original = experiment.build_hybrid_shadow_features(
+            reset_original,
+            experiment.add_prior_season_carryover_features(reset_original),
+        )
+        shadow_changed = experiment.build_hybrid_shadow_features(
+            reset_changed,
+            experiment.add_prior_season_carryover_features(reset_changed),
+        )
+        columns = ["my_fantasy_points_last3", "carries_last3", "offense_pct_last3"]
+        original = shadow_original.loc[shadow_original["season"] == 2022].iloc[0]
+        changed = shadow_changed.loc[shadow_changed["season"] == 2022].iloc[0]
+
+        pd.testing.assert_series_equal(original[columns], changed[columns])
+
     def test_metrics_include_mae_rank_and_pairwise_accuracy(self):
         rows = pd.DataFrame(
             {
@@ -230,13 +308,86 @@ class WeekOneInitializationTests(unittest.TestCase):
         self.assertEqual(rb["prior_usage_rule"], 1)
         self.assertEqual(rb["depth_or_usage"], 2)
 
+    def test_recommendation_accepts_good_and_rejects_bad_results(self):
+        season_rows = []
+        filtering_rows = []
+        for season in experiment.DEFAULT_EVALUATION_SEASONS:
+            for position in experiment.POSITIONS:
+                season_rows.append(
+                    {
+                        "season": season,
+                        "position": position,
+                        "reset_mae": 5.0,
+                        "carryover_mae": 4.5,
+                        "reset_rank_correlation": 0.2,
+                        "carryover_rank_correlation": 0.4,
+                        "reset_pairwise_accuracy": 0.52,
+                        "carryover_pairwise_accuracy": 0.62,
+                    }
+                )
+                filtering_rows.append(
+                    {
+                        "season": season,
+                        "position": position,
+                        "available": True,
+                        "contributors": 20,
+                        "contributor_retention_pct": 1.0,
+                    }
+                )
+        good = experiment.assess_production_readiness(
+            pd.DataFrame(season_rows), pd.DataFrame(filtering_rows)
+        )
+        bad_rows = pd.DataFrame(season_rows)
+        bad_rows.loc[bad_rows["position"] == "WR", "carryover_rank_correlation"] = -0.3
+        bad_rows.loc[bad_rows["position"] == "WR", "carryover_pairwise_accuracy"] = 0.35
+        bad = experiment.assess_production_readiness(
+            bad_rows, pd.DataFrame(filtering_rows)
+        )
+
+        self.assertTrue(good["ready"])
+        self.assertFalse(bad["ready"])
+        self.assertTrue(bad["catastrophic_regressions"])
+
+        filtering_blocked = experiment.assess_production_readiness(
+            pd.DataFrame(season_rows),
+            pd.DataFrame(filtering_rows),
+            pd.DataFrame([{"player_name": "Missed Starter", "week1_points": 20.0}]),
+        )
+        self.assertTrue(filtering_blocked["initialization_ready"])
+        self.assertFalse(filtering_blocked["filtering_ready"])
+        self.assertIn("filter is not", filtering_blocked["recommendation"])
+
+    def test_historical_filtering_reports_missing_depth_data(self):
+        rosters = pd.DataFrame(
+            [{"season": 2022, "week": 1, "team": "AAA", "position": "QB", "gsis_id": "qb"}]
+        )
+        stats = pd.DataFrame(
+            [{"season": 2022, "week": 1, "season_type": "REG", "team": "AAA", "position": "QB", "player_id": "qb"}]
+        )
+        schedules = pd.DataFrame(
+            [{"season": 2022, "week": 1, "game_type": "REG", "gameday": "2022-09-08"}]
+        )
+
+        summary, exclusions = experiment.evaluate_historical_filtering(
+            rosters, pd.DataFrame(), stats, schedules, [2022]
+        )
+
+        self.assertTrue((summary["available"] == False).all())
+        self.assertTrue(summary["limitation"].str.contains("no depth-chart data").all())
+        self.assertTrue(exclusions.empty)
+
     @patch.object(experiment, "run_experiment")
     def test_cli_prints_report_without_network(self, run_experiment):
-        run_experiment.return_value = (
-            pd.DataFrame([{"approach": "season_reset", "position": "QB", "mae": 1.0}]),
-            pd.DataFrame([{"season": 2022, "position": "QB", "week1_players": 1}]),
-            pd.DataFrame([{"position": "QB", "depth_or_usage": 2}]),
-        )
+        run_experiment.return_value = {
+            "season_results": pd.DataFrame([{"season": 2022, "position": "QB"}]),
+            "aggregate_results": pd.DataFrame([{"approach": "season_reset"}]),
+            "shadow_results": pd.DataFrame([{"approach": "hybrid_shadow"}]),
+            "coverage": pd.DataFrame([{"season": 2022, "position": "QB"}]),
+            "historical_filtering": pd.DataFrame([{"available": False}]),
+            "false_exclusions": pd.DataFrame(),
+            "current_filtering": pd.DataFrame([{"position": "QB"}]),
+            "readiness": {"recommendation": "Keep production unchanged."},
+        }
 
         with patch("builtins.print") as output:
             status = experiment.main(["--evaluation-seasons", "2022", "2023"])
