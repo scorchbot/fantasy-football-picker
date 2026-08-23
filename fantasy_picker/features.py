@@ -79,6 +79,15 @@ PREGAME_FEATURE_NAMES = (
     *SCHEDULE_CONTEXT_FEATURES,
 )
 
+WEEK1_CARRYOVER_FEATURES = (
+    *(f"{column}_last3" for column in PLAYER_ROLLING_COLUMNS),
+    *(f"{column}_last3" for column in QB_ROLLING_COLUMNS),
+    "offense_pct_last3",
+    "offense_pct_last5",
+    "snap_trend",
+    *(f"{column}_last3" for column in OPPORTUNITY_COLUMNS),
+)
+
 
 def _require_columns(frame: pd.DataFrame, columns: Iterable[str], label: str) -> None:
     missing = [column for column in columns if column not in frame.columns]
@@ -468,6 +477,96 @@ def build_pregame_features(
     result = add_defense_matchup_features(result)
     result = add_opportunity_rolling_features(result)
     return result.sort_values(["player_id", "season", "week"]).reset_index(drop=True)
+
+
+def _last_completed_game_means(
+    player_games: pd.DataFrame,
+    source_columns: Sequence[str],
+    window: int,
+) -> pd.DataFrame:
+    """Summarize each player's latest completed rows without crossing seasons."""
+
+    result = _ensure_columns(player_games, source_columns)
+    result = result.sort_values(["player_id", "week"])
+    summaries = result[["player_id"]].drop_duplicates().set_index("player_id")
+    for column in source_columns:
+        summaries[f"{column}_last{window}"] = result.groupby("player_id")[
+            column
+        ].apply(lambda values: values.tail(window).mean())
+    return summaries.reset_index()
+
+
+def build_prior_season_carryover_summary(
+    prior_player_games: pd.DataFrame,
+    season: int,
+    *,
+    prior_snap_counts: Optional[pd.DataFrame] = None,
+    prior_ff_opportunity: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Build Week 1 rolling values from the immediately prior regular season."""
+
+    if prior_player_games is None or prior_player_games.empty:
+        return pd.DataFrame(columns=["player_id", *WEEK1_CARRYOVER_FEATURES])
+    _require_columns(
+        prior_player_games,
+        ("player_id", "season", "week"),
+        "prior_player_games",
+    )
+    prior = prior_player_games.loc[prior_player_games["season"] == season - 1].copy()
+    if "season_type" in prior:
+        prior = prior.loc[prior["season_type"] == "REG"].copy()
+    if prior.empty:
+        return pd.DataFrame(columns=["player_id", *WEEK1_CARRYOVER_FEATURES])
+
+    prior = attach_snap_counts(prior, prior_snap_counts)
+    prior = attach_opportunity_features(prior, prior_ff_opportunity)
+    rolling_sources = PLAYER_ROLLING_COLUMNS + QB_ROLLING_COLUMNS
+    last3 = _last_completed_game_means(prior, rolling_sources, 3)
+    snap3 = _last_completed_game_means(prior, ("offense_pct",), 3)
+    snap5 = _last_completed_game_means(prior, ("offense_pct",), 5)
+    opportunity = _last_completed_game_means(prior, OPPORTUNITY_COLUMNS, 3)
+    summary = last3.merge(snap3, on="player_id", how="outer")
+    summary = summary.merge(snap5, on="player_id", how="outer")
+    summary = summary.merge(opportunity, on="player_id", how="outer")
+    summary["snap_trend"] = (
+        summary["offense_pct_last3"] - summary["offense_pct_last5"]
+    )
+    return summary[["player_id", *WEEK1_CARRYOVER_FEATURES]]
+
+
+def apply_week1_prior_season_carryover(
+    features: pd.DataFrame,
+    prior_player_games: pd.DataFrame,
+    season: int,
+    week: int,
+    *,
+    prior_snap_counts: Optional[pd.DataFrame] = None,
+    prior_ff_opportunity: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Override Week 1 rolling values for immediate prior-season returners only."""
+
+    result = features.copy(deep=True)
+    result["uses_prior_season_history"] = False
+    if week != 1:
+        return result
+
+    summary = build_prior_season_carryover_summary(
+        prior_player_games,
+        season,
+        prior_snap_counts=prior_snap_counts,
+        prior_ff_opportunity=prior_ff_opportunity,
+    )
+    if summary.empty:
+        return result
+
+    summary = summary.set_index("player_id")
+    selected = (result["season"] == season) & (result["week"] == 1)
+    player_ids = result.loc[selected, "player_id"]
+    returning = player_ids.isin(summary.index)
+    result.loc[selected, "uses_prior_season_history"] = returning.to_numpy()
+    for feature in WEEK1_CARRYOVER_FEATURES:
+        result.loc[selected, feature] = player_ids.map(summary[feature]).to_numpy()
+    return result
 
 
 def select_current_week_feature_row(

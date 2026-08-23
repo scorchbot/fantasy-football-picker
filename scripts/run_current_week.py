@@ -100,6 +100,27 @@ def validate_fresh_inputs(
     elif "player_stats" in empty:
         errors.append("player_stats is empty; prior-game features are unavailable")
 
+    if week == 1 and "prior_player_stats" in raw_inputs:
+        if raw_inputs["prior_player_stats"].empty:
+            warnings.append(
+                f"{season - 1} player history is unavailable; Week 1 rolling "
+                "features will use stored model medians."
+            )
+        else:
+            warnings.append(
+                f"Using completed {season - 1} player history to initialize "
+                f"eligible {season} Week 1 rolling features."
+            )
+        for dataset, label in (
+            ("prior_snap_counts", "snap"),
+            ("prior_ff_opportunity", "opportunity"),
+        ):
+            if dataset in raw_inputs and raw_inputs[dataset].empty:
+                warnings.append(
+                    f"{season - 1} {label} history is unavailable; affected "
+                    "Week 1 features will use stored model medians."
+                )
+
     schedules = raw_inputs["schedules"]
     schedule_count = _target_week_count(schedules, season, week)
     if schedule_count == 0:
@@ -145,10 +166,25 @@ def validate_fresh_inputs(
                 "injuries",
                 "ff_opportunity",
             }:
-                warnings.append(
-                    f"{dataset} is not published yet; using stored model medians "
-                    "for unavailable features."
-                )
+                prior_dataset = {
+                    "snap_counts": "prior_snap_counts",
+                    "ff_opportunity": "prior_ff_opportunity",
+                }.get(dataset)
+                if (
+                    prior_dataset is not None
+                    and prior_dataset in raw_inputs
+                    and not raw_inputs[prior_dataset].empty
+                ):
+                    warnings.append(
+                        f"{dataset} is not published yet; returning players use "
+                        f"completed {season - 1} history and other players use "
+                        "stored model medians."
+                    )
+                else:
+                    warnings.append(
+                        f"{dataset} is not published yet; using stored model medians "
+                        "for unavailable features."
+                    )
             else:
                 errors.append(
                     f"{dataset} is empty; required model features are unavailable: "
@@ -183,7 +219,9 @@ def generate_current_week_projections(
     """Load fresh data and artifacts, validate them, and run existing inference."""
 
     artifacts = models.load_model_artifacts(artifact_path)
-    raw_inputs = nflverse.load_current_week_inputs(season)
+    raw_inputs = nflverse.load_current_week_inputs(
+        season, include_prior_season_history=(week == 1)
+    )
     warnings = validate_fresh_inputs(raw_inputs, artifacts, season, week)
     projections = current_week.build_current_week_projections(
         season,

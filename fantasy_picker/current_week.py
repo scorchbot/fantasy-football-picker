@@ -12,10 +12,15 @@ from fantasy_picker.confidence import (
     lineup_confidence_label,
 )
 from fantasy_picker.decisions import build_lineup_decision_report
-from fantasy_picker.features import INJURY_FEATURES, build_pregame_features
+from fantasy_picker.features import (
+    INJURY_FEATURES,
+    apply_week1_prior_season_carryover,
+    build_pregame_features,
+)
 from fantasy_picker.lineup import optimize_lineup_fast
 from fantasy_picker.models import ModelArtifacts, coerce_model_artifacts
 from fantasy_picker.projections import project_players
+from fantasy_picker.scoring import MY_YAHOO_SCORING, score_player
 
 
 SUPPORTED_POSITIONS = ("QB", "RB", "WR", "TE")
@@ -39,6 +44,37 @@ def _copy_frame(raw_inputs: Mapping[str, Any], name: str) -> pd.DataFrame:
 
 def _first_present(columns: Sequence[str], candidates: Sequence[str]) -> str | None:
     return next((name for name in candidates if name in columns), None)
+
+
+def _normalize_player_stats(player_stats: pd.DataFrame) -> pd.DataFrame:
+    """Normalize raw nflverse names needed by the existing feature builders."""
+
+    if player_stats.empty:
+        return player_stats.copy(deep=True)
+    result = player_stats.copy(deep=True)
+    renames = {}
+    if "recent_team" not in result and "team" in result:
+        renames["team"] = "recent_team"
+    if "interceptions" not in result and "passing_interceptions" in result:
+        renames["passing_interceptions"] = "interceptions"
+    result = result.rename(columns=renames)
+    if "player_display_name" not in result:
+        name = _first_present(result.columns, ("player_name", "full_name"))
+        if name is not None:
+            result["player_display_name"] = result[name]
+    if "my_fantasy_points" not in result:
+        result["my_fantasy_points"] = result.apply(
+            lambda row: score_player(row, MY_YAHOO_SCORING), axis=1
+        )
+    return result
+
+
+def _normalize_opportunity(opportunity: pd.DataFrame) -> pd.DataFrame:
+    result = opportunity.copy(deep=True)
+    if not result.empty:
+        result["season"] = pd.to_numeric(result["season"], errors="raise").astype(int)
+        result["week"] = pd.to_numeric(result["week"], errors="raise").astype(int)
+    return result
 
 
 def _current_roster_rows(
@@ -120,7 +156,7 @@ def build_current_week_projections(
         raise TypeError("raw_inputs must be a mapping of pandas DataFrames")
 
     artifacts = coerce_model_artifacts(model_artifacts)
-    player_stats = _copy_frame(raw_inputs, "player_stats")
+    player_stats = _normalize_player_stats(_copy_frame(raw_inputs, "player_stats"))
     weekly_rosters = _copy_frame(raw_inputs, "weekly_rosters")
     player_games = _add_missing_current_rows(
         player_stats, weekly_rosters, season, week
@@ -136,6 +172,17 @@ def build_current_week_projections(
         injuries=injuries,
         ff_opportunity=_copy_frame(raw_inputs, "ff_opportunity"),
     )
+    if week == 1:
+        feature_rows = apply_week1_prior_season_carryover(
+            feature_rows,
+            _normalize_player_stats(_copy_frame(raw_inputs, "prior_player_stats")),
+            season,
+            week,
+            prior_snap_counts=_copy_frame(raw_inputs, "prior_snap_counts"),
+            prior_ff_opportunity=_normalize_opportunity(
+                _copy_frame(raw_inputs, "prior_ff_opportunity")
+            ),
+        )
     if injuries.empty:
         feature_rows[list(INJURY_FEATURES)] = float("nan")
     current_rows = feature_rows.loc[
@@ -159,6 +206,9 @@ def build_current_week_projections(
         )
         player["season"] = season
         player["week"] = week
+        player["uses_prior_season_history"] = bool(
+            row.get("uses_prior_season_history", False)
+        )
 
     return projected
 

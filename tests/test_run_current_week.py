@@ -105,7 +105,9 @@ class RunCurrentWeekTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         load_artifacts.assert_called_once_with(Path("artifacts/fantasy_models.pkl"))
-        load_inputs.assert_called_once_with(2026)
+        load_inputs.assert_called_once_with(
+            2026, include_prior_season_history=False
+        )
         build_projections.assert_called_once_with(
             2026, 7, inputs, loaded_artifacts
         )
@@ -241,6 +243,15 @@ class RunCurrentWeekTests(unittest.TestCase):
         inputs["injuries"] = pd.DataFrame()
         inputs["ff_opportunity"] = pd.DataFrame()
         inputs["depth_charts"] = pd.DataFrame()
+        inputs["prior_player_stats"] = pd.DataFrame(
+            {"season": [2025], "week": [18], "player_id": ["player-1"]}
+        )
+        inputs["prior_snap_counts"] = pd.DataFrame(
+            {"season": [2025], "week": [18]}
+        )
+        inputs["prior_ff_opportunity"] = pd.DataFrame(
+            {"season": [2025], "week": [18]}
+        )
         load_artifacts.return_value = required_artifacts
         load_inputs.return_value = inputs
         build_projections.return_value = PROJECTIONS
@@ -258,6 +269,24 @@ class RunCurrentWeekTests(unittest.TestCase):
         self.assertIn(
             "injuries is not published yet; using stored model medians",
             error.getvalue(),
+        )
+        self.assertIn(
+            "Using completed 2025 player history to initialize eligible 2026 "
+            "Week 1 rolling features.",
+            error.getvalue(),
+        )
+        self.assertIn(
+            "snap_counts is not published yet; returning players use completed "
+            "2025 history",
+            error.getvalue(),
+        )
+        self.assertIn(
+            "ff_opportunity is not published yet; returning players use completed "
+            "2025 history",
+            error.getvalue(),
+        )
+        load_inputs.assert_called_once_with(
+            2026, include_prior_season_history=True
         )
         build_projections.assert_called_once_with(
             2026, 1, inputs, required_artifacts

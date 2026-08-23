@@ -11,6 +11,7 @@ from fantasy_picker.features import (
     add_defense_matchup_features,
     add_player_rolling_features,
     add_snap_rolling_features,
+    apply_week1_prior_season_carryover,
     build_pregame_features,
     build_team_game_context,
     select_current_week_feature_row,
@@ -323,6 +324,93 @@ class FeatureTests(unittest.TestCase):
         self.assertTrue(expected.issubset(self.features.columns))
         self.assertTrue(expected.issubset(PREGAME_FEATURE_NAMES))
         self.assertTrue(set(PREGAME_FEATURE_NAMES).issubset(self.features.columns))
+
+    def test_week_one_carryover_uses_only_immediate_prior_season(self):
+        current = pd.DataFrame(
+            [
+                {"player_id": "returner", "season": 2026, "week": 1},
+                {"player_id": "rookie", "season": 2026, "week": 1},
+                {"player_id": "stale", "season": 2026, "week": 1},
+            ]
+        )
+        prior_rows = []
+        for week, points in enumerate((10.0, 20.0, 30.0, 40.0), start=1):
+            prior_rows.append(
+                {
+                    "player_id": "returner",
+                    "player_display_name": "Returning Player",
+                    "position": "QB",
+                    "season": 2025,
+                    "season_type": "REG",
+                    "week": week,
+                    "recent_team": "AAA",
+                    "opponent_team": "BBB",
+                    "my_fantasy_points": points,
+                    "carries": points,
+                    "targets": 0.0,
+                    "receptions": 0.0,
+                    "rushing_yards": points,
+                    "receiving_yards": 0.0,
+                    "target_share": 0.0,
+                    "completions": points,
+                    "attempts": points,
+                    "passing_yards": points,
+                    "passing_tds": 0.0,
+                    "interceptions": 0.0,
+                    "passing_air_yards": points,
+                    "passing_epa": points,
+                    "rushing_tds": 0.0,
+                }
+            )
+        prior_rows.append({**prior_rows[-1], "player_id": "stale", "season": 2024})
+        prior = pd.DataFrame(prior_rows)
+        snaps = pd.DataFrame(
+            {
+                "season": [2025] * 4,
+                "week": [1, 2, 3, 4],
+                "player_id": ["returner"] * 4,
+                "offense_pct": [0.5, 0.6, 0.7, 0.8],
+            }
+        )
+        opportunity = make_opportunity().assign(
+            season=2025,
+            player_id="returner",
+            pass_yards_gained_exp=[10.0, 20.0, 30.0, 40.0],
+        )
+
+        result = apply_week1_prior_season_carryover(
+            current,
+            prior,
+            2026,
+            1,
+            prior_snap_counts=snaps,
+            prior_ff_opportunity=opportunity,
+        ).set_index("player_id")
+
+        self.assertEqual(result.loc["returner", "my_fantasy_points_last3"], 30.0)
+        self.assertEqual(result.loc["returner", "carries_last3"], 30.0)
+        self.assertAlmostEqual(result.loc["returner", "offense_pct_last3"], 0.7)
+        self.assertAlmostEqual(result.loc["returner", "offense_pct_last5"], 0.65)
+        self.assertAlmostEqual(result.loc["returner", "snap_trend"], 0.05)
+        self.assertEqual(result.loc["returner", "pass_yards_gained_exp_last3"], 30.0)
+        self.assertTrue(result.loc["returner", "uses_prior_season_history"])
+        self.assertTrue(pd.isna(result.loc["rookie", "my_fantasy_points_last3"]))
+        self.assertTrue(pd.isna(result.loc["stale", "my_fantasy_points_last3"]))
+        self.assertFalse(result.loc["rookie", "uses_prior_season_history"])
+        self.assertFalse(result.loc["stale", "uses_prior_season_history"])
+
+    def test_week_two_is_not_overridden_by_prior_season(self):
+        current = pd.DataFrame(
+            [{"player_id": "returner", "season": 2026, "week": 2,
+              "my_fantasy_points_last3": 12.0}]
+        )
+
+        result = apply_week1_prior_season_carryover(
+            current, pd.DataFrame(), 2026, 2
+        )
+
+        self.assertEqual(result.iloc[0]["my_fantasy_points_last3"], 12.0)
+        self.assertFalse(result.iloc[0]["uses_prior_season_history"])
 
 
 if __name__ == "__main__":

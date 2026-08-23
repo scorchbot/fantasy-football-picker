@@ -224,6 +224,32 @@ class NFLVerseDataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "season must be an integer"):
             nflverse.load_current_week_inputs([2025])
 
+    def test_week_one_context_can_load_prior_season_history_separately(self):
+        loader_names = list(PUBLIC_LOADERS)
+        patches = {
+            name: patch.object(nflverse, name, return_value=f"{name}-frame")
+            for name in loader_names
+        }
+        mocks = {name: patcher.start() for name, patcher in patches.items()}
+        self.addCleanup(lambda: [patcher.stop() for patcher in patches.values()])
+
+        result = nflverse.load_current_week_inputs(
+            2026, include_prior_season_history=True
+        )
+
+        self.assertEqual(result["prior_player_stats"], "load_player_stats-frame")
+        self.assertEqual(result["prior_snap_counts"], "load_snap_counts-frame")
+        self.assertEqual(result["prior_ff_opportunity"], "load_ff_opportunity-frame")
+        self.assertEqual(
+            mocks["load_player_stats"].call_args_list[-1].args, (2025,)
+        )
+        self.assertEqual(
+            mocks["load_snap_counts"].call_args_list[-1].args, (2025,)
+        )
+        self.assertEqual(
+            mocks["load_ff_opportunity"].call_args_list[-1].args, (2025,)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

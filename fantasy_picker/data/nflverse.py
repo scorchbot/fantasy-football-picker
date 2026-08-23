@@ -199,13 +199,15 @@ def load_ff_opportunity(seasons: Seasons, *, allow_missing: bool = False) -> Any
     )
 
 
-def load_current_week_inputs(season: int) -> dict[str, Any]:
+def load_current_week_inputs(
+    season: int, *, include_prior_season_history: bool = False
+) -> dict[str, Any]:
     """Load unfiltered raw inputs for future current-week feature construction."""
 
     if isinstance(season, bool) or not isinstance(season, int):
         raise ValueError("season must be an integer.")
 
-    return {
+    inputs = {
         "schedules": load_schedules(season),
         "player_stats": load_player_stats(season, allow_missing=True),
         "weekly_rosters": load_weekly_rosters(
@@ -216,3 +218,17 @@ def load_current_week_inputs(season: int) -> dict[str, Any]:
         "depth_charts": load_depth_charts(season, allow_missing=True),
         "ff_opportunity": load_ff_opportunity(season, allow_missing=True),
     }
+    if include_prior_season_history:
+        prior_season = season - 1
+        inputs.update(
+            {
+                "prior_player_stats": load_player_stats(prior_season),
+                "prior_snap_counts": load_snap_counts(
+                    prior_season, allow_missing=True
+                ),
+                "prior_ff_opportunity": load_ff_opportunity(
+                    prior_season, allow_missing=True
+                ),
+            }
+        )
+    return inputs

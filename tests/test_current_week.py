@@ -152,6 +152,58 @@ def raw_inputs(stats=None):
     }
 
 
+def week_one_carryover_inputs(current_points=999.0, future_points=5000.0):
+    inputs = raw_inputs(stats=pd.DataFrame())
+    inputs["weekly_rosters"] = pd.DataFrame(
+        [
+            {"season": 2026, "week": 1, "gsis_id": "returner", "full_name": "Returner", "team": "AAA", "position": "RB"},
+            {"season": 2026, "week": 1, "gsis_id": "rookie", "full_name": "Rookie", "team": "AAA", "position": "RB"},
+            {"season": 2026, "week": 1, "gsis_id": "stale", "full_name": "Stale Veteran", "team": "AAA", "position": "RB"},
+        ]
+    )
+    current_rows = []
+    for week, points in ((1, current_points), (2, future_points)):
+        current_rows.append(
+            {
+                "player_id": "returner",
+                "player_display_name": "Returner",
+                "position": "RB",
+                "season": 2026,
+                "week": week,
+                "recent_team": "AAA",
+                "my_fantasy_points": points,
+            }
+        )
+    inputs["player_stats"] = pd.DataFrame(current_rows)
+    prior_rows = []
+    for week, points in enumerate((10.0, 20.0, 30.0, 40.0), start=1):
+        prior_rows.append(
+            {
+                "player_id": "returner",
+                "player_display_name": "Returner",
+                "position": "RB",
+                "season": 2025,
+                "season_type": "REG",
+                "week": week,
+                "recent_team": "AAA",
+                "opponent_team": "BBB",
+                "my_fantasy_points": points,
+            }
+        )
+    prior_rows.append(
+        {
+            **prior_rows[-1],
+            "player_id": "stale",
+            "player_display_name": "Stale Veteran",
+            "season": 2024,
+        }
+    )
+    inputs["prior_player_stats"] = pd.DataFrame(prior_rows)
+    inputs["prior_snap_counts"] = pd.DataFrame()
+    inputs["prior_ff_opportunity"] = pd.DataFrame()
+    return inputs
+
+
 LEAGUE = {
     "roster_slots": [
         {"slot": "QB", "eligible": ["QB"]},
@@ -227,6 +279,63 @@ class CurrentWeekTests(unittest.TestCase):
         self.assertTrue(
             all(pd.isna(player["actual_points"]) for player in projected)
         )
+
+    def test_week_one_hybrid_uses_prior_season_and_median_fallbacks(self):
+        median_artifacts = artifacts()
+        median_artifacts = ModelArtifacts(
+            final_models=median_artifacts.final_models,
+            final_features=median_artifacts.final_features,
+            final_medians={
+                position: {"my_fantasy_points_last3": 7.5}
+                for position in POSITIONS
+            },
+        )
+
+        projected = build_current_week_projections(
+            2026, 1, week_one_carryover_inputs(), median_artifacts
+        )
+        by_id = {player["player_id"]: player for player in projected}
+
+        self.assertEqual(by_id["returner"]["projection"], 30.0)
+        self.assertTrue(by_id["returner"]["uses_prior_season_history"])
+        self.assertEqual(by_id["rookie"]["projection"], 7.5)
+        self.assertEqual(by_id["stale"]["projection"], 7.5)
+        self.assertFalse(by_id["rookie"]["uses_prior_season_history"])
+        self.assertFalse(by_id["stale"]["uses_prior_season_history"])
+
+    def test_week_one_carryover_ignores_current_and_future_results(self):
+        low = build_current_week_projections(
+            2026,
+            1,
+            week_one_carryover_inputs(current_points=-1000.0, future_points=-2000.0),
+            artifacts(),
+        )
+        high = build_current_week_projections(
+            2026,
+            1,
+            week_one_carryover_inputs(current_points=9000.0, future_points=8000.0),
+            artifacts(),
+        )
+
+        low_values = {player["player_id"]: player["projection"] for player in low}
+        high_values = {player["player_id"]: player["projection"] for player in high}
+        self.assertEqual(low_values, high_values)
+
+    def test_week_two_uses_current_season_instead_of_carryover(self):
+        inputs = week_one_carryover_inputs()
+        inputs["weekly_rosters"] = inputs["weekly_rosters"].assign(week=2)
+        inputs["player_stats"] = pd.DataFrame(
+            [
+                {"player_id": "returner", "player_display_name": "Returner", "position": "RB", "season": 2026, "week": 1, "recent_team": "AAA", "my_fantasy_points": 11.0},
+                {"player_id": "returner", "player_display_name": "Returner", "position": "RB", "season": 2026, "week": 2, "recent_team": "AAA", "my_fantasy_points": 999.0},
+            ]
+        )
+
+        projected = build_current_week_projections(2026, 2, inputs, artifacts())
+        returner = next(player for player in projected if player["player_id"] == "returner")
+
+        self.assertEqual(returner["projection"], 11.0)
+        self.assertFalse(returner["uses_prior_season_history"])
 
     def test_unpublished_injuries_use_stored_medians_not_healthy_zeros(self):
         inputs = raw_inputs(stats=pd.DataFrame())
