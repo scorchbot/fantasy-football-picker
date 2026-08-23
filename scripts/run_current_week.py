@@ -46,6 +46,17 @@ def _target_week_count(frame: Any, season: int, week: int) -> int:
     return int(((frame["season"] == season) & (frame["week"] == week)).sum())
 
 
+def _current_roster_count(frame: Any, season: int, week: int) -> int:
+    """Count weekly rows or legitimate preseason seasonal-roster fallback rows."""
+
+    if frame is None or frame.empty or "season" not in frame.columns:
+        return 0
+    selected = frame.loc[frame["season"] == season]
+    if "week" in selected.columns:
+        selected = selected.loc[selected["week"] == week]
+    return len(selected)
+
+
 def _required_model_features(artifacts: models.ModelArtifacts) -> set[str]:
     return {
         feature
@@ -79,7 +90,14 @@ def validate_fresh_inputs(
 
     empty = [name for name in expected_datasets if raw_inputs[name].empty]
     errors = []
-    if "player_stats" in empty:
+    warnings = []
+    pre_week_one_without_stats = week == 1 and "player_stats" in empty
+    if pre_week_one_without_stats:
+        warnings.append(
+            f"{season} player stats are not published yet; continuing with "
+            "pregame roster/context data."
+        )
+    elif "player_stats" in empty:
         errors.append("player_stats is empty; prior-game features are unavailable")
 
     schedules = raw_inputs["schedules"]
@@ -102,7 +120,7 @@ def validate_fresh_inputs(
         )
 
     rosters = raw_inputs["weekly_rosters"]
-    roster_count = _target_week_count(rosters, season, week)
+    roster_count = _current_roster_count(rosters, season, week)
     if roster_count == 0:
         errors.append(
             f"missing current-week roster rows for season {season}, week {week}"
@@ -122,18 +140,39 @@ def validate_fresh_inputs(
     for dataset, dataset_features in FEATURE_SOURCE_REQUIREMENTS.items():
         affected = sorted(required_features & dataset_features)
         if dataset in empty and affected:
-            errors.append(
-                f"{dataset} is empty; required model features are unavailable: "
-                + ", ".join(affected)
-            )
+            if pre_week_one_without_stats and dataset in {
+                "snap_counts",
+                "injuries",
+                "ff_opportunity",
+            }:
+                warnings.append(
+                    f"{dataset} is not published yet; using stored model medians "
+                    "for unavailable features."
+                )
+            else:
+                errors.append(
+                    f"{dataset} is empty; required model features are unavailable: "
+                    + ", ".join(affected)
+                )
 
     if errors:
         empty_detail = f" Empty nflverse datasets: {', '.join(empty)}." if empty else ""
         raise CurrentWeekRunError("; ".join(errors) + empty_detail)
 
-    return [
-        f"Empty optional nflverse datasets: {', '.join(empty)}"
-    ] if empty else []
+    diagnosed = {
+        "player_stats",
+        *(
+            dataset
+            for dataset, dataset_features in FEATURE_SOURCE_REQUIREMENTS.items()
+            if required_features & dataset_features
+        ),
+    }
+    optional_empty = [name for name in empty if name not in diagnosed]
+    if optional_empty:
+        warnings.append(
+            f"Empty optional nflverse datasets: {', '.join(optional_empty)}"
+        )
+    return warnings
 
 
 def generate_current_week_projections(

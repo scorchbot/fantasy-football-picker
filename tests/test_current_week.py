@@ -203,6 +203,64 @@ class CurrentWeekTests(unittest.TestCase):
         high_values = {player["player_id"]: player["projection"] for player in high}
         self.assertEqual(low_values, high_values)
 
+    def test_week_one_uses_roster_placeholders_when_player_stats_are_unpublished(self):
+        inputs = raw_inputs(stats=pd.DataFrame())
+        inputs["weekly_rosters"] = weekly_rosters().assign(week=1)
+        median_artifacts = artifacts()
+        median_artifacts = ModelArtifacts(
+            final_models=median_artifacts.final_models,
+            final_features=median_artifacts.final_features,
+            final_medians={
+                position: {"my_fantasy_points_last3": 7.5}
+                for position in POSITIONS
+            },
+        )
+
+        projected = build_current_week_projections(
+            2026, 1, inputs, median_artifacts
+        )
+
+        self.assertEqual(len(projected), 6)
+        self.assertTrue(
+            all(player["projection"] == 7.5 for player in projected)
+        )
+        self.assertTrue(
+            all(pd.isna(player["actual_points"]) for player in projected)
+        )
+
+    def test_unpublished_injuries_use_stored_medians_not_healthy_zeros(self):
+        inputs = raw_inputs(stats=pd.DataFrame())
+        inputs["weekly_rosters"] = weekly_rosters().assign(week=1)
+        median_artifacts = artifacts()
+        median_artifacts = ModelArtifacts(
+            final_models=median_artifacts.final_models,
+            final_features={
+                position: ["questionable"] for position in POSITIONS
+            },
+            final_medians={
+                position: {"questionable": 0.25} for position in POSITIONS
+            },
+        )
+
+        projected = build_current_week_projections(
+            2026, 1, inputs, median_artifacts
+        )
+
+        self.assertTrue(
+            all(player["projection"] == 0.25 for player in projected)
+        )
+
+    def test_week_one_accepts_preseason_seasonal_roster_snapshot(self):
+        inputs = raw_inputs(stats=pd.DataFrame())
+        inputs["weekly_rosters"] = weekly_rosters().drop(columns="week")
+
+        projected = build_current_week_projections(
+            2026, 1, inputs, artifacts()
+        )
+
+        self.assertEqual(len(projected), 6)
+        self.assertTrue(all(player["week"] == 1 for player in projected))
+
     def test_output_feeds_optimizer_and_roster_lineup_helper(self):
         projected = build_current_week_projections(
             2026, 3, raw_inputs(), artifacts()

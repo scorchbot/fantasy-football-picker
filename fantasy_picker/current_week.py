@@ -12,7 +12,7 @@ from fantasy_picker.confidence import (
     lineup_confidence_label,
 )
 from fantasy_picker.decisions import build_lineup_decision_report
-from fantasy_picker.features import build_pregame_features
+from fantasy_picker.features import INJURY_FEATURES, build_pregame_features
 from fantasy_picker.lineup import optimize_lineup_fast
 from fantasy_picker.models import ModelArtifacts, coerce_model_artifacts
 from fantasy_picker.projections import project_players
@@ -46,14 +46,14 @@ def _current_roster_rows(
 ) -> pd.DataFrame:
     """Normalize current weekly roster identifiers into player-game placeholders."""
 
-    if weekly_rosters.empty or not {"season", "week", "position"}.issubset(
+    if weekly_rosters.empty or not {"season", "position"}.issubset(
         weekly_rosters.columns
     ):
         return pd.DataFrame()
 
-    roster = weekly_rosters.loc[
-        (weekly_rosters["season"] == season) & (weekly_rosters["week"] == week)
-    ].copy()
+    roster = weekly_rosters.loc[weekly_rosters["season"] == season].copy()
+    if "week" in roster.columns:
+        roster = roster.loc[roster["week"] == week].copy()
     if roster.empty:
         return roster
 
@@ -128,13 +128,16 @@ def build_current_week_projections(
     if player_games.empty:
         return []
 
+    injuries = _copy_frame(raw_inputs, "injuries")
     feature_rows = build_pregame_features(
         player_games=player_games,
         schedules=_copy_frame(raw_inputs, "schedules"),
         snap_counts=_copy_frame(raw_inputs, "snap_counts"),
-        injuries=_copy_frame(raw_inputs, "injuries"),
+        injuries=injuries,
         ff_opportunity=_copy_frame(raw_inputs, "ff_opportunity"),
     )
+    if injuries.empty:
+        feature_rows[list(INJURY_FEATURES)] = float("nan")
     current_rows = feature_rows.loc[
         (feature_rows["season"] == season)
         & (feature_rows["week"] == week)

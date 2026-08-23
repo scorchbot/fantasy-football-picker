@@ -153,6 +153,28 @@ class RunCurrentWeekTests(unittest.TestCase):
 
         build_projections.assert_not_called()
 
+    @patch("scripts.run_current_week.current_week.build_current_week_projections")
+    @patch("scripts.run_current_week.nflverse.load_current_week_inputs")
+    @patch("scripts.run_current_week.models.load_model_artifacts")
+    def test_preseason_seasonal_roster_snapshot_is_valid_context(
+        self, load_artifacts, load_inputs, build_projections
+    ):
+        loaded_artifacts = artifacts()
+        inputs = fresh_inputs()
+        inputs["weekly_rosters"] = pd.DataFrame(
+            {"season": [2026], "player_id": ["player-1"]}
+        )
+        load_artifacts.return_value = loaded_artifacts
+        load_inputs.return_value = inputs
+        build_projections.return_value = PROJECTIONS
+
+        projections, _ = generate_current_week_projections(2026, 1)
+
+        self.assertEqual(projections, PROJECTIONS)
+        build_projections.assert_called_once_with(
+            2026, 1, inputs, loaded_artifacts
+        )
+
     @patch("scripts.run_current_week.nflverse.load_current_week_inputs")
     @patch("scripts.run_current_week.models.load_model_artifacts")
     def test_empty_required_feature_data_has_clear_cli_failure(
@@ -162,25 +184,84 @@ class RunCurrentWeekTests(unittest.TestCase):
         required_artifacts = ModelArtifacts(
             final_models=required_artifacts.final_models,
             final_features={
-                position: ["offense_pct_last3"] for position in POSITIONS
+                position: ["offense_pct_last3", "questionable"]
+                for position in POSITIONS
             },
             final_medians={
-                position: {"offense_pct_last3": 0.6} for position in POSITIONS
+                position: {
+                    "offense_pct_last3": 0.6,
+                    "questionable": 0.1,
+                }
+                for position in POSITIONS
             },
         )
         load_artifacts.return_value = required_artifacts
-        inputs = fresh_inputs()
+        inputs = fresh_inputs(week=2)
         inputs["snap_counts"] = pd.DataFrame()
         load_inputs.return_value = inputs
         error = io.StringIO()
 
         with redirect_stderr(error):
-            exit_code = main(["--season", "2026", "--week", "1"])
+            exit_code = main(["--season", "2026", "--week", "2"])
 
         self.assertEqual(exit_code, 1)
         self.assertIn("snap_counts is empty", error.getvalue())
         self.assertIn("offense_pct_last3", error.getvalue())
         self.assertNotIn("Players projected:", error.getvalue())
+
+    @patch("scripts.run_current_week.current_week.build_current_week_projections")
+    @patch("scripts.run_current_week.nflverse.load_current_week_inputs")
+    @patch("scripts.run_current_week.models.load_model_artifacts")
+    def test_week_one_unpublished_postgame_data_warns_and_projects(
+        self, load_artifacts, load_inputs, build_projections
+    ):
+        required_artifacts = artifacts()
+        required_artifacts = ModelArtifacts(
+            final_models=required_artifacts.final_models,
+            final_features={
+                position: [
+                    "offense_pct_last3",
+                    "questionable",
+                    "my_expected_opportunity_points_last3",
+                ]
+                for position in POSITIONS
+            },
+            final_medians={
+                position: {
+                    "offense_pct_last3": 0.6,
+                    "questionable": 0.1,
+                    "my_expected_opportunity_points_last3": 12.0,
+                }
+                for position in POSITIONS
+            },
+        )
+        inputs = fresh_inputs()
+        inputs["player_stats"] = pd.DataFrame()
+        inputs["snap_counts"] = pd.DataFrame()
+        inputs["injuries"] = pd.DataFrame()
+        inputs["ff_opportunity"] = pd.DataFrame()
+        inputs["depth_charts"] = pd.DataFrame()
+        load_artifacts.return_value = required_artifacts
+        load_inputs.return_value = inputs
+        build_projections.return_value = PROJECTIONS
+        error = io.StringIO()
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(error):
+            exit_code = main(["--season", "2026", "--week", "1"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(
+            "2026 player stats are not published yet; continuing with pregame "
+            "roster/context data.",
+            error.getvalue(),
+        )
+        self.assertIn(
+            "injuries is not published yet; using stored model medians",
+            error.getvalue(),
+        )
+        build_projections.assert_called_once_with(
+            2026, 1, inputs, required_artifacts
+        )
 
 
 if __name__ == "__main__":
