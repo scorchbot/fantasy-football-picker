@@ -49,6 +49,25 @@ def synthetic_inputs():
 
 
 class EvaluateSeasonValueTests(unittest.TestCase):
+    def parameter_grid(self):
+        rows = []
+        for season in (2022, 2023, 2024):
+            for position, winner in (("QB", 0.0), ("RB", 1.0), ("WR", 0.3), ("TE", 0.7)):
+                for weight in (0.0, 0.3, 0.7, 1.0):
+                    quality = 1.0 - abs(weight - winner)
+                    rows.append(
+                        {
+                            "season": season,
+                            "position": position,
+                            "week1_weight": weight,
+                            "availability_strategy": "linear_17_games",
+                            "rank_correlation": quality,
+                            "top_n_overlap": quality,
+                            "vor_rank_correlation": quality,
+                        }
+                    )
+        return pd.DataFrame(rows)
+
     def test_build_rows_keeps_target_actuals_out_of_preseason_signals(self):
         predictions, stats = synthetic_inputs()
         original = evaluation.build_preseason_evaluation_rows(predictions, stats, [2022])
@@ -72,6 +91,103 @@ class EvaluateSeasonValueTests(unittest.TestCase):
         self.assertEqual(set(results["approach"]), set(evaluation.APPROACHES))
         self.assertEqual(set(results["position"]), {"QB", "RB", "WR", "TE", "OVERALL"})
         self.assertEqual(set(aggregate["approach"]), set(evaluation.APPROACHES))
+
+    def test_weight_selection_never_uses_target_season(self):
+        selections = evaluation.select_walk_forward_parameters(
+            self.parameter_grid(),
+            [2022, 2023, 2024],
+            parameter="week1_weight",
+            default_value=0.4,
+        )
+        calibration = selections.loc[selections["season"].eq(2022)]
+        self.assertTrue(calibration["calibration"].all())
+        self.assertTrue((calibration["selected_week1_weight"] == 0.4).all())
+        for _, row in selections.loc[~selections["calibration"]].iterrows():
+            self.assertLess(row["selected_using_through_season"], row["season"])
+
+    def test_future_seasons_cannot_change_earlier_selected_weights(self):
+        grid = self.parameter_grid()
+        original = evaluation.select_walk_forward_parameters(
+            grid, [2022, 2023, 2024], parameter="week1_weight", default_value=0.4
+        )
+        future = grid.loc[grid["season"].eq(2024)].copy()
+        future["season"] = 2025
+        future["rank_correlation"] = future["week1_weight"] * 100
+        future["top_n_overlap"] = future["week1_weight"] * 100
+        future["vor_rank_correlation"] = future["week1_weight"] * 100
+        changed = evaluation.select_walk_forward_parameters(
+            pd.concat([grid, future], ignore_index=True),
+            [2022, 2023, 2024],
+            parameter="week1_weight",
+            default_value=0.4,
+        )
+        pd.testing.assert_frame_equal(original, changed)
+
+    def test_position_specific_weights_can_differ(self):
+        selections = evaluation.select_walk_forward_parameters(
+            self.parameter_grid(),
+            [2022, 2023],
+            parameter="week1_weight",
+            default_value=0.4,
+        )
+        selected = selections.loc[selections["season"].eq(2023)].set_index("position")
+        self.assertEqual(selected.loc["QB", "selected_week1_weight"], 0.0)
+        self.assertEqual(selected.loc["RB", "selected_week1_weight"], 1.0)
+        self.assertNotEqual(
+            selected.loc["WR", "selected_week1_weight"],
+            selected.loc["TE", "selected_week1_weight"],
+        )
+
+    def test_diagnostic_exactly_reconstructs_season_value(self):
+        player = {
+            "player_id": "p",
+            "name": "Player",
+            "position": "WR",
+            "week1_projection": 12.0,
+            "prior_season_fppg": 18.0,
+            "prior_season_games": 10,
+            "season_value_score": 0.4 * 12.0 + 0.6 * ((10 / 17) * 18 + (7 / 17) * 10),
+            "replacement_level_score": 9.0,
+            "season_value_vor": 4.2,
+            "overall_rank": 12,
+        }
+        diagnostic = evaluation.build_player_diagnostic(player, 10.0)
+        self.assertAlmostEqual(
+            diagnostic["season_value_score"], player["season_value_score"]
+        )
+        self.assertAlmostEqual(diagnostic["reconstruction_difference"], 0.0)
+
+    def test_rookie_rows_never_receive_fabricated_prior_history(self):
+        predictions, stats = synthetic_inputs()
+        rookie_prediction = pd.DataFrame(
+            [{"season": 2022, "position": "WR", "player_id": "rookie", "player_name": "Rookie", "prediction": 11.0}]
+        )
+        rookie_actual = pd.DataFrame(
+            [{"season": 2022, "week": 1, "season_type": "REG", "position": "WR", "player_id": "rookie", "my_fantasy_points": 20.0}]
+        )
+        rows = evaluation.build_preseason_evaluation_rows(
+            pd.concat([predictions, rookie_prediction], ignore_index=True),
+            pd.concat([stats, rookie_actual], ignore_index=True),
+            [2022],
+        )
+        rookie = rows.loc[rows["player_id"].eq("rookie")].iloc[0]
+        self.assertTrue(pd.isna(rookie["prior_season_fppg"]))
+        self.assertEqual(rookie["prior_season_games"], 0)
+        self.assertTrue(rookie["used_prior_median_fallback"])
+
+    def test_rookie_bias_is_measured_against_full_position_pool(self):
+        rows = pd.DataFrame(
+            [
+                {"season": 2022, "position": "WR", "player_id": "v1", "prior_season_fppg": 10.0,
+                 "hybrid_season_value_score": 10.0, "actual_season_points": 100.0},
+                {"season": 2022, "position": "WR", "player_id": "v2", "prior_season_fppg": 9.0,
+                 "hybrid_season_value_score": 9.0, "actual_season_points": 90.0},
+                {"season": 2022, "position": "WR", "player_id": "rookie", "prior_season_fppg": None,
+                 "hybrid_season_value_score": 20.0, "actual_season_points": 1.0},
+            ]
+        )
+        result = evaluation.evaluate_rookie_fallback(rows).iloc[0]
+        self.assertGreater(result["mean_percentile_bias"], 0)
 
     def test_recommendation_selects_stronger_synthetic_approach(self):
         aggregate = pd.DataFrame(
