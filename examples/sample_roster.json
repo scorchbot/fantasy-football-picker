@@ -1,0 +1,15 @@
+{
+  "league_name": "Illustrative Sample League",
+  "players": [
+    {"name": "Joe Burrow", "position": "QB", "team": "CIN"},
+    {"name": "Jahmyr Gibbs", "position": "RB", "team": "DET"},
+    {"name": "Bijan Robinson", "position": "RB", "team": "ATL"},
+    {"name": "Amon-Ra St. Brown", "position": "WR", "team": "DET"},
+    {"name": "Ja'Marr Chase", "position": "WR", "team": "CIN"},
+    {"name": "Brock Bowers", "position": "TE", "team": "LV"},
+    {"name": "Saquon Barkley", "position": "RB", "team": "PHI"},
+    {"name": "Justin Herbert", "position": "QB", "team": "LAC"},
+    {"name": "Puka Nacua", "position": "WR", "team": "LA"},
+    {"name": "Trey McBride", "position": "TE", "team": "ARI"}
+  ]
+}
